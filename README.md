@@ -1,6 +1,6 @@
 # fri-commitment
 
-FRI commitment scheme implemented on arkworks libraries.
+FRI implemented on arkworks libraries.
 
 > *Note*: done in my free time to learn about FRI, do not use in production.
 

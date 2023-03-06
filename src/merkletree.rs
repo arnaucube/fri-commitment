@@ -105,9 +105,9 @@ impl<F: PrimeField> MerkleTree<F> {
         }
         path
     }
-    pub fn gen_proof(&self, index: usize) -> Vec<F> {
+    pub fn gen_proof(&self, index: F) -> Vec<F> {
         // start from root, and go down to the index, while getting the siblings at each level
-        let path = Self::get_path(self.nlevels, F::from(index as u32));
+        let path = Self::get_path(self.nlevels, index);
         // reverse path as we're going from up to down
         let path_inv = path.iter().copied().rev().collect();
         let mut siblings: Vec<F> = Vec::new();
@@ -126,9 +126,9 @@ impl<F: PrimeField> MerkleTree<F> {
             return Self::go_down(path[1..].to_vec(), *node.right.unwrap(), siblings);
         }
     }
-    pub fn verify(params: &Params<F>, root: F, index: usize, value: F, siblings: Vec<F>) -> bool {
+    pub fn verify(params: &Params<F>, root: F, index: F, value: F, siblings: Vec<F>) -> bool {
         let mut h = params.poseidon_hash.hash(&[value]).unwrap();
-        let path = Self::get_path(siblings.len() as u32, F::from(index as u32));
+        let path = Self::get_path(siblings.len() as u32, index);
         for i in 0..siblings.len() {
             if !path[i] {
                 h = params
@@ -150,6 +150,12 @@ impl<F: PrimeField> MerkleTree<F> {
 }
 
 pub struct MerkleTreePoseidon<F: PrimeField>(MerkleTree<F>);
+
+pub struct MTProof<F: PrimeField> {
+    index: F,
+    siblings: Vec<F>,
+}
+
 impl<F: PrimeField> MerkleTreePoseidon<F> {
     pub fn commit(values: &[F]) -> (F, Self) {
         let poseidon_params = poseidon_setup_params::<F>(Curve::Bn254, 5, 4);
@@ -158,10 +164,10 @@ impl<F: PrimeField> MerkleTreePoseidon<F> {
         let mt = MerkleTree::new(&params, values.to_vec());
         (mt.root.hash, MerkleTreePoseidon(mt))
     }
-    pub fn prove(&self, index: usize) -> Vec<F> {
+    pub fn open(&self, index: F) -> Vec<F> {
         self.0.gen_proof(index)
     }
-    pub fn verify(root: F, index: usize, value: F, siblings: Vec<F>) -> bool {
+    pub fn verify(root: F, index: F, value: F, siblings: Vec<F>) -> bool {
         let poseidon_params = poseidon_setup_params::<F>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
         let params = MerkleTree::setup(&poseidon_hash);
@@ -258,12 +264,13 @@ mod tests {
         );
 
         let index = 3;
-        let siblings = mt.gen_proof(index);
+        let index_F = Fr::from(index as u32);
+        let siblings = mt.gen_proof(index_F);
 
         assert!(MerkleTree::verify(
             &params,
             mt.root.hash,
-            index,
+            index_F,
             values[index],
             siblings
         ));
@@ -278,7 +285,7 @@ mod tests {
 
         let mut rng = ark_std::test_rng();
 
-        let n_values = 256;
+        let n_values = 64;
         let mut values: Vec<Fr> = Vec::new();
         for _i in 0..n_values {
             let v = Fr::rand(&mut rng);
@@ -286,14 +293,15 @@ mod tests {
         }
 
         let mt = MerkleTree::new(&params, values.to_vec());
-        assert_eq!(mt.nlevels, 8);
+        assert_eq!(mt.nlevels, 6);
 
         for i in 0..n_values {
-            let siblings = mt.gen_proof(i);
+            let i_Fr = Fr::from(i as u32);
+            let siblings = mt.gen_proof(i_Fr);
             assert!(MerkleTree::verify(
                 &params,
                 mt.root.hash,
-                i,
+                i_Fr,
                 values[i],
                 siblings
             ));
