@@ -4,6 +4,8 @@
 
 pub mod merkletree;
 use merkletree::MerkleTreePoseidon as MT;
+pub mod transcript;
+use transcript::Transcript;
 
 use ark_ff::PrimeField;
 use ark_poly::{
@@ -50,6 +52,9 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
 
     // prove implements the proof generation for a FRI-low-degree-testing
     pub fn prove(p: &P) -> (Vec<F>, Vec<Vec<F>>, Vec<F>, [F; 2]) {
+        // init transcript
+        let mut transcript: Transcript<F> = Transcript::<F>::new();
+
         let d = p.degree();
         let mut commitments: Vec<F> = Vec::new();
         let mut mts: Vec<MT<F>> = Vec::new();
@@ -63,9 +68,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
             GeneralEvaluationDomain::new(sub_order).unwrap();
 
         // V sets rand z \in \mathbb{F} challenge
-        // TODO this will be a hash from the transcript
-        let z_pos = 3;
-        let z = eval_sub_domain.element(z_pos);
+        let (z_pos, z) = transcript.get_challenge_in_eval_domain(eval_sub_domain, b"get z");
 
         let mut f_is: Vec<P> = Vec::new();
         // evals = {f_i(z^{2^i}), f_i(-z^{2^i})} \forall i \in F_i
@@ -76,7 +79,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
         let mut i = 0;
         while f_i1.degree() >= 1 {
             f_is.push(f_i1.clone());
-            let alpha_i = F::from(42_u64); // TODO: WIP, defined by Verifier (well, hash transcript)
+            let alpha_i = transcript.get_challenge(b"get alpha_i");
 
             let subdomain_evaluations: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
                 .map(|k| f_i1.evaluate(&eval_sub_domain.element(k)))
@@ -86,14 +89,17 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
             let (cm_i, mt_i) = MT::commit(&subdomain_evaluations); // commit to the evaluation domain instead
             commitments.push(cm_i);
             mts.push(mt_i);
+            transcript.add(b"root_i", &cm_i);
 
             // evaluate f_i(z^{2^i}), f_i(-z^{2^i}), and open their commitment
             let z_2i = z.pow([2_u64.pow(i as u32)]); // z^{2^i} // TODO check usage of .pow(u64)
             let neg_z_2i = z_2i.neg();
             let eval_i = f_i1.evaluate(&z_2i);
             evals.push(eval_i);
+            transcript.add(b"f_i(z^{2^i})", &eval_i);
             let eval_i = f_i1.evaluate(&neg_z_2i);
             evals.push(eval_i);
+            transcript.add(b"f_i(-z^{2^i})", &eval_i);
 
             // gen the openings in the commitment to f_i(z^(2^i))
             let mtproof = mts[i].open(F::from(z_pos as u32));
@@ -131,12 +137,14 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
         evals: Vec<F>,
         constants: [F; 2],
     ) -> bool {
+        // init transcript
+        let mut transcript: Transcript<F> = Transcript::<F>::new();
+
         let sub_order = rho1 * degree; // TMP, TODO this will depend on rho parameter
         let eval_sub_domain: GeneralEvaluationDomain<F> =
             GeneralEvaluationDomain::new(sub_order).unwrap();
-        // TODO this will be a hash from the transcript
-        let z_pos = 3;
-        let z = eval_sub_domain.element(z_pos);
+
+        let (z_pos, z) = transcript.get_challenge_in_eval_domain(eval_sub_domain, b"get z");
 
         if commitments.len() != (evals.len() / 2) {
             println!("sho commitments.len() != (evals.len() / 2) - 1");
@@ -145,7 +153,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
 
         let mut i_z = 0;
         for i in (0..evals.len()).step_by(2) {
-            let alpha_i = F::from(42_u64); // TODO: WIP, defined by Verifier (well, hash transcript)
+            let alpha_i = transcript.get_challenge(b"get alpha_i");
 
             // take f_i(z^2) from evals
             let z_2i = z.pow([2_u64.pow(i_z as u32)]); // z^{2^i}
@@ -168,6 +176,9 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
                     return false;
                 }
             }
+            transcript.add(b"root_i", &commitments[i_z]);
+            transcript.add(b"f_i(z^{2^i})", &evals[i]);
+            transcript.add(b"f_i(-z^{2^i})", &evals[i + 1]);
 
             // check commitment opening
             if !MT::verify(

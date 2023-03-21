@@ -16,5 +16,11 @@ ark-bn254 = { version = "^0.3.0", default-features = false }
 ark-ed-on-bn254 = { version = "^0.3.0", default-features = true }
 ark-crypto-primitives = { version = "^0.3.0", default-features = true }
 rand = { version = "0.8", features = [ "std", "std_rng" ] }
+
+# poseidon related
 arkworks-utils = { git = "https://github.com/aragonzkresearch/arkworks-gadgets", name="arkworks-utils", features=["poseidon_bn254_x5_4"] }
 arkworks-native-gadgets = { git = "https://github.com/aragonzkresearch/arkworks-gadgets", name="arkworks-native-gadgets"}
+
+# transcript related
+merlin = { version = "3.0.0" }
+ark-serialize = { version = "^0.3.0", default-features = false, features = [ "derive" ] }
