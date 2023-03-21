@@ -151,11 +151,6 @@ impl<F: PrimeField> MerkleTree<F> {
 
 pub struct MerkleTreePoseidon<F: PrimeField>(MerkleTree<F>);
 
-pub struct MTProof<F: PrimeField> {
-    index: F,
-    siblings: Vec<F>,
-}
-
 impl<F: PrimeField> MerkleTreePoseidon<F> {
     pub fn commit(values: &[F]) -> (F, Self) {
         let poseidon_params = poseidon_setup_params::<F>(Curve::Bn254, 5, 4);

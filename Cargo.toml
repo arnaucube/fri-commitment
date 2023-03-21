@@ -1,7 +1,10 @@
 [package]
-name = "fri-study"
+name = "fri-commitment"
 version = "0.1.0"
+authors = ["arnaucube <root@arnaucube.com>"]
 edition = "2021"
+license = "GPL-3.0"
+repository = "https://github.com/arnaucube/fri-commitment"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

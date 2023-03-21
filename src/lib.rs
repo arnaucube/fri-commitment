@@ -1,18 +1,21 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
+#![allow(non_upper_case_globals)]
 
 pub mod merkletree;
-use merkletree::{MerkleTreePoseidon as MT, Params as MTParams};
+use merkletree::MerkleTreePoseidon as MT;
 
 use ark_ff::PrimeField;
 use ark_poly::{
     univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain, UVPolynomial,
 };
 
-use ark_std::log2;
+use ark_std::cfg_into_iter;
 use ark_std::marker::PhantomData;
 use ark_std::ops::Mul;
-use ark_std::{cfg_into_iter, rand::Rng, UniformRand};
+
+// rho^-1
+const rho1: usize = 8; // WIP
 
 pub struct FRI_LDT<F: PrimeField, P: UVPolynomial<F>> {
     _f: PhantomData<F>,
@@ -46,7 +49,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
     }
 
     // prove implements the proof generation for a FRI-low-degree-testing
-    pub fn prove<R: Rng>(rng: &mut R, p: &P) -> (Vec<F>, Vec<Vec<F>>, Vec<F>, [F; 2]) {
+    pub fn prove(p: &P) -> (Vec<F>, Vec<Vec<F>>, Vec<F>, [F; 2]) {
         let d = p.degree();
         let mut commitments: Vec<F> = Vec::new();
         let mut mts: Vec<MT<F>> = Vec::new();
@@ -55,38 +58,25 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
         let mut f_i1 = p.clone();
 
         // sub_order = |F_i| = rho^-1 * d
-        let mut sub_order = d; // TMP, TODO this will depend on rho parameter
+        let mut sub_order = d * rho1; // TMP, TODO this will depend on rho parameter
         let mut eval_sub_domain: GeneralEvaluationDomain<F> =
             GeneralEvaluationDomain::new(sub_order).unwrap();
-
-        // TODO merge in the next for loop
-        let evals: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
-            .map(|k| f_i1.evaluate(&eval_sub_domain.element(k)))
-            .collect();
-        let (cm_i, mt_i) = MT::commit(&evals);
-        commitments.push(cm_i);
-        mts.push(mt_i);
-        sub_order = sub_order / 2;
-        eval_sub_domain = GeneralEvaluationDomain::new(sub_order).unwrap();
-        //
 
         // V sets rand z \in \mathbb{F} challenge
         // TODO this will be a hash from the transcript
         let z_pos = 3;
         let z = eval_sub_domain.element(z_pos);
-        let z_pos = z_pos * 2; // WIP
 
         let mut f_is: Vec<P> = Vec::new();
-        f_is.push(p.clone());
-        while f_i1.degree() > 1 {
-            let alpha_i = F::from(42_u64); // TODO: WIP, defined by Verifier (well, hash transcript)
-
-            let (fL_i, fR_i) = Self::split(&f_i1);
-
-            // compute f_{i+1}(x) = fL_i(x) + alpha_i * fR_i(x)
-            let aux = DensePolynomial::from_coefficients_slice(fR_i.coeffs());
-            f_i1 = fL_i.clone() + P::from_coefficients_slice(aux.mul(alpha_i).coeffs());
+        // evals = {f_i(z^{2^i}), f_i(-z^{2^i})} \forall i \in F_i
+        let mut evals: Vec<F> = Vec::new();
+        let mut mtproofs: Vec<Vec<F>> = Vec::new();
+        let mut fL_i: P = P::from_coefficients_vec(Vec::new());
+        let mut fR_i: P = P::from_coefficients_vec(Vec::new());
+        let mut i = 0;
+        while f_i1.degree() >= 1 {
             f_is.push(f_i1.clone());
+            let alpha_i = F::from(42_u64); // TODO: WIP, defined by Verifier (well, hash transcript)
 
             let subdomain_evaluations: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
                 .map(|k| f_i1.evaluate(&eval_sub_domain.element(k)))
@@ -97,31 +87,38 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
             commitments.push(cm_i);
             mts.push(mt_i);
 
-            // prepare next subdomain
-            sub_order = sub_order / 2;
-            eval_sub_domain = GeneralEvaluationDomain::new(sub_order).unwrap();
-        }
-        let (fL_i, fR_i) = Self::split(&f_i1);
-        let constant_fL_l: F = fL_i.coeffs()[0].clone();
-        let constant_fR_l: F = fR_i.coeffs()[0].clone();
-
-        // evals = {f_i(z^{2^i}), f_i(-z^{2^i})} \forall i \in F_i
-        let mut evals: Vec<F> = Vec::new();
-        let mut mtproofs: Vec<Vec<F>> = Vec::new();
-        // TODO this will be done inside the prev loop, now it is here just for clarity
-        // evaluate f_i(z^{2^i}), f_i(-z^{2^i}), and open their commitment
-        for i in 0..f_is.len() {
+            // evaluate f_i(z^{2^i}), f_i(-z^{2^i}), and open their commitment
             let z_2i = z.pow([2_u64.pow(i as u32)]); // z^{2^i} // TODO check usage of .pow(u64)
             let neg_z_2i = z_2i.neg();
-            let eval_i = f_is[i].evaluate(&z_2i);
+            let eval_i = f_i1.evaluate(&z_2i);
             evals.push(eval_i);
-            let eval_i = f_is[i].evaluate(&neg_z_2i);
+            let eval_i = f_i1.evaluate(&neg_z_2i);
             evals.push(eval_i);
 
             // gen the openings in the commitment to f_i(z^(2^i))
-            let mtproof = mts[i].open(F::from(z_pos as u32)); // WIP open to 2^i?
+            let mtproof = mts[i].open(F::from(z_pos as u32));
             mtproofs.push(mtproof);
+
+            (fL_i, fR_i) = Self::split(&f_i1);
+
+            // compute f_{i+1}(x) = fL_i(x) + alpha_i * fR_i(x)
+            let aux = DensePolynomial::from_coefficients_slice(fR_i.coeffs());
+            f_i1 = fL_i.clone() + P::from_coefficients_slice(aux.mul(alpha_i).coeffs());
+
+            // prepare next subdomain
+            sub_order = sub_order / 2;
+            eval_sub_domain = GeneralEvaluationDomain::new(sub_order).unwrap();
+
+            i += 1;
         }
+        if fL_i.coeffs().len() != 1 {
+            panic!("fL_i not constant");
+        }
+        if fR_i.coeffs().len() != 1 {
+            panic!("fR_i not constant");
+        }
+        let constant_fL_l: F = fL_i.coeffs()[0].clone();
+        let constant_fR_l: F = fR_i.coeffs()[0].clone();
 
         (commitments, mtproofs, evals, [constant_fL_l, constant_fR_l])
     }
@@ -134,13 +131,12 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
         evals: Vec<F>,
         constants: [F; 2],
     ) -> bool {
-        let sub_order = ((degree + 1) / 2) - 1; // TMP, TODO this will depend on rho parameter
+        let sub_order = rho1 * degree; // TMP, TODO this will depend on rho parameter
         let eval_sub_domain: GeneralEvaluationDomain<F> =
             GeneralEvaluationDomain::new(sub_order).unwrap();
         // TODO this will be a hash from the transcript
         let z_pos = 3;
         let z = eval_sub_domain.element(z_pos);
-        let z_pos = z_pos * 2;
 
         if commitments.len() != (evals.len() / 2) {
             println!("sho commitments.len() != (evals.len() / 2) - 1");
@@ -176,7 +172,6 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
             // check commitment opening
             if !MT::verify(
                 commitments[i_z],
-                // F::from(i as u32),
                 F::from(z_pos as u32),
                 evals[i],
                 mtproofs[i_z].clone(),
@@ -209,9 +204,11 @@ mod tests {
     use super::*;
     use ark_ff::Field;
     use ark_std::UniformRand;
-    pub type Fr = ark_bn254::Fr; // scalar field
+    // pub type Fr = ark_bn254::Fr; // scalar field
+    use ark_bn254::Fr; // scalar field
     use ark_poly::univariate::DensePolynomial;
     use ark_poly::Polynomial;
+    use ark_std::log2;
 
     #[test]
     fn test_split() {
@@ -220,8 +217,8 @@ mod tests {
         let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
         assert_eq!(p.degree(), deg);
 
-        type FRIT = FRI_LDT<Fr, DensePolynomial<Fr>>;
-        let (pL, pR) = FRIT::split(&p);
+        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>>;
+        let (pL, pR) = FRID::split(&p);
 
         // check that f(z) == fL(x^2) + x * fR(x^2), for a rand z
         let z = Fr::rand(&mut rng);
@@ -235,26 +232,19 @@ mod tests {
     fn test_prove() {
         let mut rng = ark_std::test_rng();
 
-        let deg = 15;
+        let deg = 31;
         let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
         assert_eq!(p.degree(), deg);
         // println!("p {:?}", p);
 
-        type FRIT = FRI_LDT<Fr, DensePolynomial<Fr>>;
-        // prover
-        let (commitments, mtproofs, evals, constvals) = FRIT::prove(&mut rng, &p);
+        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>>;
+
+        let (commitments, mtproofs, evals, constvals) = FRID::prove(&p);
         // commitments contains the commitments to each f_0, f_1, ..., f_n, with n=log2(d)
         assert_eq!(commitments.len(), log2(p.coeffs().len()) as usize);
         assert_eq!(evals.len(), 2 * log2(p.coeffs().len()) as usize);
 
-        let v = FRIT::verify(
-            // Fr::from(deg as u32),
-            deg,
-            commitments,
-            mtproofs,
-            evals,
-            constvals,
-        );
+        let v = FRID::verify(deg, commitments, mtproofs, evals, constvals);
         assert!(v);
     }
 }
