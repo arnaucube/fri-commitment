@@ -20,7 +20,7 @@ impl<F: PrimeField> Transcript<F> {
     }
     pub fn add<T: CanonicalSerialize>(&mut self, label: &'static [u8], r: &T) {
         let mut buf = vec![];
-        r.serialize(&mut buf).unwrap();
+        r.serialize_uncompressed(&mut buf).unwrap();
         self.transcript.append_message(label, buf.as_ref());
     }
     pub fn get_challenge(&mut self, label: &'static [u8]) -> F {

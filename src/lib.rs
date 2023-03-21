@@ -3,13 +3,13 @@
 #![allow(non_upper_case_globals)]
 
 pub mod merkletree;
-use merkletree::MerkleTreePoseidon as MT;
+use merkletree::{Hash, MerkleTree};
 pub mod transcript;
 use transcript::Transcript;
 
 use ark_ff::PrimeField;
 use ark_poly::{
-    univariate::DensePolynomial, EvaluationDomain, GeneralEvaluationDomain, UVPolynomial,
+    univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain,
 };
 
 use ark_std::cfg_into_iter;
@@ -19,20 +19,22 @@ use ark_std::ops::Mul;
 // rho^-1
 const rho1: usize = 8; // WIP
 
-pub struct FRI_LDT<F: PrimeField, P: UVPolynomial<F>> {
+pub struct FRI_LDT<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> {
     _f: PhantomData<F>,
     _poly: PhantomData<P>,
+    _h: PhantomData<H>,
 }
 
-impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
+impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
     pub fn new() -> Self {
         Self {
             _f: PhantomData,
             _poly: PhantomData,
+            _h: PhantomData,
         }
     }
 
-    pub fn split(p: &P) -> (P, P) {
+    fn split(p: &P) -> (P, P) {
         // let d = p.degree() + 1;
         let d = p.coeffs().len();
         if (d != 0) && (d & (d - 1) != 0) {
@@ -57,7 +59,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
 
         let d = p.degree();
         let mut commitments: Vec<F> = Vec::new();
-        let mut mts: Vec<MT<F>> = Vec::new();
+        let mut mts: Vec<MerkleTree<F, H>> = Vec::new();
 
         // f_0(x) = fL_0(x^2) + x fR_0(x^2)
         let mut f_i1 = p.clone();
@@ -85,8 +87,8 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
                 .map(|k| f_i1.evaluate(&eval_sub_domain.element(k)))
                 .collect();
 
-            // commit to f_{i+1}(x) = fL_i(x) + alpha_i * fR_i(x)
-            let (cm_i, mt_i) = MT::commit(&subdomain_evaluations); // commit to the evaluation domain instead
+            // commit to f_{i+1}(x) = fL_i(x) + alpha_i * fR_i(x), commit to the evaluation domain
+            let (cm_i, mt_i) = MerkleTree::<F, H>::commit(&subdomain_evaluations);
             commitments.push(cm_i);
             mts.push(mt_i);
             transcript.add(b"root_i", &cm_i);
@@ -181,7 +183,7 @@ impl<F: PrimeField, P: UVPolynomial<F>> FRI_LDT<F, P> {
             transcript.add(b"f_i(-z^{2^i})", &evals[i + 1]);
 
             // check commitment opening
-            if !MT::verify(
+            if !MerkleTree::<F, H>::verify(
                 commitments[i_z],
                 F::from(z_pos as u32),
                 evals[i],
@@ -220,6 +222,7 @@ mod tests {
     use ark_poly::univariate::DensePolynomial;
     use ark_poly::Polynomial;
     use ark_std::log2;
+    use merkletree::Keccak256Hash;
 
     #[test]
     fn test_split() {
@@ -228,7 +231,7 @@ mod tests {
         let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
         assert_eq!(p.degree(), deg);
 
-        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>>;
+        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
         let (pL, pR) = FRID::split(&p);
 
         // check that f(z) == fL(x^2) + x * fR(x^2), for a rand z
@@ -248,7 +251,7 @@ mod tests {
         assert_eq!(p.degree(), deg);
         // println!("p {:?}", p);
 
-        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>>;
+        type FRID = FRI_LDT<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
 
         let (commitments, mtproofs, evals, constvals) = FRID::prove(&p);
         // commitments contains the commitments to each f_0, f_1, ..., f_n, with n=log2(d)

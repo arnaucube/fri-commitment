@@ -4,40 +4,59 @@
 // https://github.com/vocdoni/arbo).
 
 use ark_ff::{BigInteger, PrimeField};
+use ark_serialize::CanonicalSerialize;
 use ark_std::log2;
-use arkworks_native_gadgets::poseidon;
-use arkworks_native_gadgets::poseidon::FieldHasher;
-use arkworks_utils::{
-    bytes_matrix_to_f, bytes_vec_to_f, poseidon_params::setup_poseidon_params, Curve,
-};
+use ark_std::marker::PhantomData;
+use sha3::{Digest, Keccak256};
 
-pub struct Params<F: PrimeField> {
-    pub poseidon_hash: poseidon::Poseidon<F>,
+// abstraction to set the hash function used
+pub trait Hash<F>: Clone {
+    fn hash(_in: &[F]) -> F;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Keccak256Hash<F: PrimeField> {
+    phantom: PhantomData<F>,
+}
+impl<F: PrimeField> Hash<F> for Keccak256Hash<F> {
+    fn hash(_in: &[F]) -> F {
+        let mut buf = vec![];
+        _in.serialize_uncompressed(&mut buf).unwrap();
+
+        let mut h = Keccak256::default();
+        h.update(buf);
+        let r = h.finalize();
+        let out = F::from_le_bytes_mod_order(&r);
+        out
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct Node<F: PrimeField> {
+pub struct Node<F: PrimeField, H: Hash<F>> {
+    phantom: PhantomData<H>,
     hash: F,
-    left: Option<Box<Node<F>>>,
-    right: Option<Box<Node<F>>>,
+    left: Option<Box<Node<F, H>>>,
+    right: Option<Box<Node<F, H>>>,
     value: Option<F>,
 }
 
-impl<F: PrimeField> Node<F> {
-    pub fn new_leaf(params: &Params<F>, v: F) -> Self {
-        let h = params.poseidon_hash.hash(&[v]).unwrap();
+impl<F: PrimeField, H: Hash<F>> Node<F, H> {
+    pub fn new_leaf(v: F) -> Self {
+        let h = H::hash(&[v]);
         Self {
+            phantom: PhantomData::<H>,
             hash: h,
             left: None,
             right: None,
             value: Some(v),
         }
     }
-    pub fn new_node(params: &Params<F>, l: Self, r: Self) -> Self {
+    pub fn new_node(l: Self, r: Self) -> Self {
         let left = Box::new(l);
         let right = Box::new(r);
-        let hash = params.poseidon_hash.hash(&[left.hash, right.hash]).unwrap();
+        let hash = H::hash(&[left.hash, right.hash]);
         Self {
+            phantom: PhantomData::<H>,
             hash,
             left: Some(left),
             right: Some(right),
@@ -46,40 +65,39 @@ impl<F: PrimeField> Node<F> {
     }
 }
 
-pub struct MerkleTree<F: PrimeField> {
-    pub root: Node<F>,
+pub struct MerkleTree<F: PrimeField, H: Hash<F>> {
+    pub root: Node<F, H>,
     nlevels: u32,
 }
 
-impl<F: PrimeField> MerkleTree<F> {
-    pub fn setup(poseidon_hash: &poseidon::Poseidon<F>) -> Params<F> {
-        Params {
-            poseidon_hash: poseidon_hash.clone(),
-        }
-    }
-    pub fn new(params: &Params<F>, values: Vec<F>) -> Self {
+impl<F: PrimeField, H: Hash<F>> MerkleTree<F, H> {
+    pub fn commit(values: &[F]) -> (F, Self) {
         // for the moment assume that values length is a power of 2.
         if (values.len() != 0) && (values.len() & (values.len() - 1) != 0) {
             panic!("values.len() should be a power of 2");
         }
 
         // prepare the leafs
-        let mut leaf_nodes: Vec<Node<F>> = Vec::new();
+        let mut leaf_nodes: Vec<Node<F, H>> = Vec::new();
         for i in 0..values.len() {
-            let node = Node::<F>::new_leaf(&params, values[i]);
+            let node = Node::<F, H>::new_leaf(values[i]);
             leaf_nodes.push(node);
         }
         // go up from the leafs to the root
-        let top_nodes = Self::up_from_nodes(&params, leaf_nodes);
+        let top_nodes = Self::up_from_nodes(leaf_nodes);
 
-        Self {
-            root: top_nodes[0].clone(),
-            nlevels: log2(values.len()),
-        }
+        (
+            top_nodes[0].hash,
+            Self {
+                root: top_nodes[0].clone(),
+                nlevels: log2(values.len()),
+            },
+        )
     }
-    fn up_from_nodes(params: &Params<F>, nodes: Vec<Node<F>>) -> Vec<Node<F>> {
+    fn up_from_nodes(nodes: Vec<Node<F, H>>) -> Vec<Node<F, H>> {
         if nodes.len() == 0 {
-            return [Node::<F> {
+            return [Node::<F, H> {
+                phantom: PhantomData::<H>,
                 hash: F::from(0_u32),
                 left: None,
                 right: None,
@@ -90,22 +108,22 @@ impl<F: PrimeField> MerkleTree<F> {
         if nodes.len() == 1 {
             return nodes;
         }
-        let mut next_level_nodes: Vec<Node<F>> = Vec::new();
+        let mut next_level_nodes: Vec<Node<F, H>> = Vec::new();
         for i in (0..nodes.len()).step_by(2) {
-            let node = Node::<F>::new_node(&params, nodes[i].clone(), nodes[i + 1].clone());
+            let node = Node::<F, H>::new_node(nodes[i].clone(), nodes[i + 1].clone());
             next_level_nodes.push(node);
         }
-        return Self::up_from_nodes(params, next_level_nodes);
+        return Self::up_from_nodes(next_level_nodes);
     }
     fn get_path(num_levels: u32, value: F) -> Vec<bool> {
-        let value_bytes = value.into_repr().to_bytes_le();
+        let value_bytes = value.into_bigint().to_bytes_le();
         let mut path = Vec::new();
         for i in 0..num_levels {
             path.push(value_bytes[(i / 8) as usize] & (1 << (i % 8)) != 0);
         }
         path
     }
-    pub fn gen_proof(&self, index: F) -> Vec<F> {
+    pub fn open(&self, index: F) -> Vec<F> {
         // start from root, and go down to the index, while getting the siblings at each level
         let path = Self::get_path(self.nlevels, index);
         // reverse path as we're going from up to down
@@ -114,7 +132,7 @@ impl<F: PrimeField> MerkleTree<F> {
         siblings = Self::go_down(path_inv, self.root.clone(), siblings);
         return siblings;
     }
-    fn go_down(path: Vec<bool>, node: Node<F>, mut siblings: Vec<F>) -> Vec<F> {
+    fn go_down(path: Vec<bool>, node: Node<F, H>, mut siblings: Vec<F>) -> Vec<F> {
         if !node.value.is_none() {
             return siblings;
         }
@@ -126,67 +144,20 @@ impl<F: PrimeField> MerkleTree<F> {
             return Self::go_down(path[1..].to_vec(), *node.right.unwrap(), siblings);
         }
     }
-    pub fn verify(params: &Params<F>, root: F, index: F, value: F, siblings: Vec<F>) -> bool {
-        let mut h = params.poseidon_hash.hash(&[value]).unwrap();
+    pub fn verify(root: F, index: F, value: F, siblings: Vec<F>) -> bool {
+        let mut h = H::hash(&[value]);
         let path = Self::get_path(siblings.len() as u32, index);
         for i in 0..siblings.len() {
             if !path[i] {
-                h = params
-                    .poseidon_hash
-                    .hash(&[h, siblings[siblings.len() - 1 - i]])
-                    .unwrap();
+                h = H::hash(&[h, siblings[siblings.len() - 1 - i]]);
             } else {
-                h = params
-                    .poseidon_hash
-                    .hash(&[siblings[siblings.len() - 1 - i], h])
-                    .unwrap();
+                h = H::hash(&[siblings[siblings.len() - 1 - i], h]);
             }
         }
         if h == root {
             return true;
         }
         false
-    }
-}
-
-pub struct MerkleTreePoseidon<F: PrimeField>(MerkleTree<F>);
-
-impl<F: PrimeField> MerkleTreePoseidon<F> {
-    pub fn commit(values: &[F]) -> (F, Self) {
-        let poseidon_params = poseidon_setup_params::<F>(Curve::Bn254, 5, 4);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
-        let params = MerkleTree::setup(&poseidon_hash);
-        let mt = MerkleTree::new(&params, values.to_vec());
-        (mt.root.hash, MerkleTreePoseidon(mt))
-    }
-    pub fn open(&self, index: F) -> Vec<F> {
-        self.0.gen_proof(index)
-    }
-    pub fn verify(root: F, index: F, value: F, siblings: Vec<F>) -> bool {
-        let poseidon_params = poseidon_setup_params::<F>(Curve::Bn254, 5, 4);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
-        let params = MerkleTree::setup(&poseidon_hash);
-        MerkleTree::verify(&params, root, index, value, siblings)
-    }
-}
-
-pub fn poseidon_setup_params<F: PrimeField>(
-    curve: Curve,
-    exp: i8,
-    width: u8,
-) -> poseidon::PoseidonParameters<F> {
-    let pos_data = setup_poseidon_params(curve, exp, width).unwrap();
-
-    let mds_f = bytes_matrix_to_f(&pos_data.mds);
-    let rounds_f = bytes_vec_to_f(&pos_data.rounds);
-
-    poseidon::PoseidonParameters {
-        mds_matrix: mds_f,
-        round_keys: rounds_f,
-        full_rounds: pos_data.full_rounds,
-        partial_rounds: pos_data.partial_rounds,
-        sbox: poseidon::sbox::PoseidonSbox(pos_data.exp),
-        width: pos_data.width,
     }
 }
 
@@ -199,47 +170,41 @@ mod tests {
     #[test]
     fn test_path() {
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(0_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(0_u32)),
             [false, false, false, false, false, false, false, false]
         );
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(1_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(1_u32)),
             [true, false, false, false, false, false, false, false]
         );
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(2_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(2_u32)),
             [false, true, false, false, false, false, false, false]
         );
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(3_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(3_u32)),
             [true, true, false, false, false, false, false, false]
         );
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(254_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(254_u32)),
             [false, true, true, true, true, true, true, true]
         );
         assert_eq!(
-            MerkleTree::get_path(8, Fr::from(255_u32)),
+            MerkleTree::<Fr, Keccak256Hash<Fr>>::get_path(8, Fr::from(255_u32)),
             [true, true, true, true, true, true, true, true]
         );
     }
 
     #[test]
     fn test_new_empty_tree() {
-        let poseidon_params = poseidon_setup_params::<Fr>(Curve::Bn254, 5, 4);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
-
-        let params = MerkleTree::setup(&poseidon_hash);
-        let mt = MerkleTree::new(&params, Vec::new());
+        let (root, mt) = MerkleTree::<Fr, Keccak256Hash<Fr>>::commit(&[]);
         assert_eq!(mt.root.hash, Fr::from(0_u32));
+        assert_eq!(root, Fr::from(0_u32));
     }
 
     #[test]
     fn test_proof() {
-        let poseidon_params = poseidon_setup_params::<Fr>(Curve::Bn254, 5, 4);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
-
-        let params = MerkleTree::setup(&poseidon_hash);
+        type MT = MerkleTree<Fr, Keccak256Hash<Fr>>;
 
         let values = [
             Fr::from(0_u32),
@@ -252,32 +217,22 @@ mod tests {
             Fr::from(203_u32),
         ];
 
-        let mt = MerkleTree::new(&params, values.to_vec());
+        let (root, mt) = MT::commit(&values);
         assert_eq!(
-            mt.root.hash.to_string(),
-            "Fp256 \"(10E90845D7A113686E4F2F30D73B315BA891A5DB9A58782F1260C35F99660794)\""
+            root.to_string(),
+            "6195952497672867974990959901930625199810318409246598214215524466855665265259"
         );
 
         let index = 3;
         let index_F = Fr::from(index as u32);
-        let siblings = mt.gen_proof(index_F);
+        let siblings = mt.open(index_F);
 
-        assert!(MerkleTree::verify(
-            &params,
-            mt.root.hash,
-            index_F,
-            values[index],
-            siblings
-        ));
+        assert!(MT::verify(root, index_F, values[index], siblings));
     }
 
     #[test]
     fn test_proofs() {
-        let poseidon_params = poseidon_setup_params::<Fr>(Curve::Bn254, 5, 4);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
-
-        let params = MerkleTree::setup(&poseidon_hash);
-
+        type MT = MerkleTree<Fr, Keccak256Hash<Fr>>;
         let mut rng = ark_std::test_rng();
 
         let n_values = 64;
@@ -287,19 +242,13 @@ mod tests {
             values.push(v);
         }
 
-        let mt = MerkleTree::new(&params, values.to_vec());
+        let (root, mt) = MT::commit(&values);
         assert_eq!(mt.nlevels, 6);
 
         for i in 0..n_values {
             let i_Fr = Fr::from(i as u32);
-            let siblings = mt.gen_proof(i_Fr);
-            assert!(MerkleTree::verify(
-                &params,
-                mt.root.hash,
-                i_Fr,
-                values[i],
-                siblings
-            ));
+            let siblings = mt.open(i_Fr);
+            assert!(MT::verify(root, i_Fr, values[i], siblings));
         }
     }
 }
