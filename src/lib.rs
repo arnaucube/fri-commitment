@@ -238,7 +238,6 @@ pub struct FRI_PCS_Proof<F: PrimeField> {
     p_proof: LDTProof<F>,
     g_proof: LDTProof<F>,
     mtproof_y: Vec<F>,
-    claimed_y: F,
 }
 
 // FRI_PCS implements the FRI Polynomial Commitment
@@ -252,7 +251,12 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_PCS<F, P, H>
 where
     for<'a, 'b> &'a P: Div<&'b P, Output = P>,
 {
-    pub fn commit(p: &P) -> (F, MerkleTree<F, H>) {
+    pub fn commit(p: &P) -> F {
+        let (cm, _) = Self::tree_from_domain_evals(p);
+        cm
+    }
+
+    fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>) {
         let d = p.degree();
         let sub_order = d * rho1;
         let eval_sub_domain: GeneralEvaluationDomain<F> =
@@ -263,7 +267,7 @@ where
         MerkleTree::<F, H>::commit(&subdomain_evaluations)
     }
 
-    pub fn open(p: &P, commitment_mt: MerkleTree<F, H>, r: F) -> FRI_PCS_Proof<F> {
+    pub fn open(p: &P, r: F) -> (F, FRI_PCS_Proof<F>) {
         let y = p.evaluate(&r);
         let y_poly: P = P::from_coefficients_vec(vec![y]);
         let mut p_y: P = p.clone();
@@ -279,18 +283,22 @@ where
         }
 
         // TODO proof for commitment
+        // reconstruct commitment_mt
+        let (_, commitment_mt) = Self::tree_from_domain_evals(&p);
         let y_eval_index = F::from(3_u32); // TODO find y in subdomain_evaluations
         let mtproof_y = commitment_mt.open(y_eval_index);
 
         let p_proof = FRI_LDT::<F, P, H>::prove(p);
         let g_proof = FRI_LDT::<F, P, H>::prove(&g);
 
-        FRI_PCS_Proof {
-            p_proof,
-            g_proof,
-            mtproof_y,
-            claimed_y: y,
-        }
+        (
+            y,
+            FRI_PCS_Proof {
+                p_proof,
+                g_proof,
+                mtproof_y,
+            },
+        )
     }
 
     pub fn verify(commitment: F, proof: FRI_PCS_Proof<F>, r: F, y: F) -> bool {
@@ -363,10 +371,8 @@ mod tests {
 
     #[test]
     fn test_prove() {
-        let mut rng = ark_std::test_rng();
-
         let deg = 31;
-        let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
+        let p = DensePolynomial::<Fr>::rand(deg, &mut ark_std::test_rng());
         assert_eq!(p.degree(), deg);
         // println!("p {:?}", p);
 
@@ -383,21 +389,19 @@ mod tests {
 
     #[test]
     fn test_polynomial_commitment() {
-        let mut rng = ark_std::test_rng();
-
         let deg = 31;
+        let mut rng = ark_std::test_rng();
         let p = DensePolynomial::<Fr>::rand(deg, &mut rng);
 
         type PCS = FRI_PCS<Fr, DensePolynomial<Fr>, Keccak256Hash<Fr>>;
 
-        let (commitment, commitment_mt) = PCS::commit(&p);
+        let commitment = PCS::commit(&p);
 
         // Verifier
         let r = Fr::rand(&mut rng);
 
-        let proof = PCS::open(&p, commitment_mt, r);
+        let (claimed_y, proof) = PCS::open(&p, r);
 
-        let claimed_y = proof.claimed_y.clone(); // WIP
         let v = PCS::verify(commitment, proof, r, claimed_y);
         assert!(v);
     }
