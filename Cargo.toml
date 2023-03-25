@@ -12,10 +12,11 @@ repository = "https://github.com/arnaucube/fri-commitment"
 ark-std = "0.4.0"
 ark-ff = "0.4.0"
 ark-poly = "0.4.0"
-ark-bn254 = { version = "0.4.0", default-features = false }
-ark-ed-on-bn254 = { version = "0.4.0", default-features = true }
-ark-crypto-primitives = { version = "0.4.0", default-features = true }
 ark-serialize = { version = "0.4.0", default-features = false, features = [ "derive" ] }
 rand = { version = "0.8", features = [ "std", "std_rng" ] }
 sha3 = "0.10.6"
 merlin = { version = "3.0.0" }
+
+[dev-dependencies]
+ark-bn254 = { version = "0.4.0", default-features = false }
+ark-ed-on-bn254 = { version = "0.4.0", default-features = true }

@@ -16,6 +16,7 @@ use ark_std::cfg_into_iter;
 use ark_std::marker::PhantomData;
 use ark_std::ops::Div;
 use ark_std::ops::Mul;
+use ark_std::{rand::Rng, UniformRand};
 
 // rho^-1
 const rho1: usize = 8; // WIP TODO parametrize
@@ -237,6 +238,7 @@ impl<F: PrimeField, P: DenseUVPolynomial<F>, H: Hash<F>> FRI_LDT<F, P, H> {
 pub struct FRI_PCS_Proof<F: PrimeField> {
     p_proof: LDTProof<F>,
     g_proof: LDTProof<F>,
+    mtproof_y_index: F, // TODO maybe include index in the mtproof, this would be done at the MerkleTree impl level
     mtproof_y: Vec<F>,
 }
 
@@ -252,11 +254,21 @@ where
     for<'a, 'b> &'a P: Div<&'b P, Output = P>,
 {
     pub fn commit(p: &P) -> F {
-        let (cm, _) = Self::tree_from_domain_evals(p);
+        let (cm, _, _) = Self::tree_from_domain_evals(p);
         cm
     }
 
-    fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>) {
+    pub fn rand_in_eval_domain<R: Rng>(rng: &mut R, deg: usize) -> F {
+        let sub_order = deg * rho1;
+        let eval_domain: GeneralEvaluationDomain<F> =
+            GeneralEvaluationDomain::new(sub_order).unwrap();
+        let size = eval_domain.size();
+        let c = usize::rand(rng);
+        let pos = c % size;
+        eval_domain.element(pos)
+    }
+
+    fn tree_from_domain_evals(p: &P) -> (F, MerkleTree<F, H>, Vec<F>) {
         let d = p.degree();
         let sub_order = d * rho1;
         let eval_sub_domain: GeneralEvaluationDomain<F> =
@@ -264,7 +276,8 @@ where
         let subdomain_evaluations: Vec<F> = cfg_into_iter!(0..eval_sub_domain.size())
             .map(|k| p.evaluate(&eval_sub_domain.element(k)))
             .collect();
-        MerkleTree::<F, H>::commit(&subdomain_evaluations)
+        let (cm, mt) = MerkleTree::<F, H>::commit(&subdomain_evaluations);
+        (cm, mt, subdomain_evaluations)
     }
 
     pub fn open(p: &P, r: F) -> (F, FRI_PCS_Proof<F>) {
@@ -282,10 +295,17 @@ where
             panic!("ERR p.deg: {}, g.deg: {}", p.degree(), g.degree()); // TODO err
         }
 
-        // TODO proof for commitment
+        // proof for commitment
         // reconstruct commitment_mt
-        let (_, commitment_mt) = Self::tree_from_domain_evals(&p);
-        let y_eval_index = F::from(3_u32); // TODO find y in subdomain_evaluations
+        let (_, commitment_mt, subdomain_evaluations) = Self::tree_from_domain_evals(&p);
+        // find y in subdomain_evaluations
+        let mut y_eval_index: F = F::zero();
+        for i in 0..subdomain_evaluations.len() {
+            if y == subdomain_evaluations[i] {
+                y_eval_index = F::from(i as u64);
+                break;
+            }
+        }
         let mtproof_y = commitment_mt.open(y_eval_index);
 
         let p_proof = FRI_LDT::<F, P, H>::prove(p);
@@ -296,6 +316,7 @@ where
             FRI_PCS_Proof {
                 p_proof,
                 g_proof,
+                mtproof_y_index: y_eval_index,
                 mtproof_y,
             },
         )
@@ -323,7 +344,10 @@ where
             return false;
         }
 
-        // TODO check commitment
+        // check that commitment was for the given y
+        if !MerkleTree::<F, H>::verify(commitment, proof.mtproof_y_index, y, proof.mtproof_y) {
+            return false;
+        }
 
         // check FRI-LDT for p(x)
         if !FRI_LDT::<F, P, H>::verify(proof.p_proof, deg_p) {
@@ -397,8 +421,8 @@ mod tests {
 
         let commitment = PCS::commit(&p);
 
-        // Verifier
-        let r = Fr::rand(&mut rng);
+        // Verifier set challenge in evaluation domain for the degree
+        let r = PCS::rand_in_eval_domain(&mut rng, deg);
 
         let (claimed_y, proof) = PCS::open(&p, r);
 
